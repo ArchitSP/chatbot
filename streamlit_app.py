@@ -1,56 +1,82 @@
+"""
+app.py
+"""
 import streamlit as st
 from openai import OpenAI
+from openai.types.beta.assistant_stream_event import ThreadMessageDelta
+from openai.types.beta.threads.text_delta_block import TextDeltaBlock 
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+ASSISTANT_ID = st.secrets["ASSISTANT_ID"]
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# Initialise the OpenAI client, and retrieve the assistant
+client = OpenAI(api_key=OPENAI_API_KEY)
+assistant = client.beta.assistants.retrieve(assistant_id=ASSISTANT_ID)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Initialise session state to store conversation history locally to display on UI
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Title
+st.title("Demo: OpenAI Assistants API Streaming")
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Display messages in chat history
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Textbox and streaming process
+if user_query := st.chat_input("Ask me a question"):
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Create a new thread if it does not exist
+    if "thread_id" not in st.session_state:
+        thread = client.beta.threads.create()
+        st.session_state.thread_id = thread.id
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
+    # Display the user's query
+    with st.chat_message("user"):
+        st.markdown(user_query)
+
+    # Store the user's query into the history
+    st.session_state.chat_history.append({"role": "user",
+                                          "content": user_query})
+    
+    # Add user query to the thread
+    client.beta.threads.messages.create(
+        thread_id=st.session_state.thread_id,
+        role="user",
+        content=user_query
         )
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    # Stream the assistant's reply
+    with st.chat_message("assistant"):
+        stream = client.beta.threads.runs.create(
+            thread_id=st.session_state.thread_id,
+            assistant_id=ASSISTANT_ID,
+            stream=True
+            )
+        
+        # Empty container to display the assistant's reply
+        assistant_reply_box = st.empty()
+        
+        # A blank string to store the assistant's reply
+        assistant_reply = ""
+
+        # Iterate through the stream 
+        for event in stream:
+            # There are various types of streaming events
+            # See here: https://platform.openai.com/docs/api-reference/assistants-streaming/events
+
+            # Here, we only consider if there's a delta text
+            if isinstance(event, ThreadMessageDelta):
+                if isinstance(event.data.delta.content[0], TextDeltaBlock):
+                    # empty the container
+                    assistant_reply_box.empty()
+                    # add the new text
+                    assistant_reply += event.data.delta.content[0].text.value
+                    # display the new text
+                    assistant_reply_box.markdown(assistant_reply)
+        
+        # Once the stream is over, update chat history
+        st.session_state.chat_history.append({"role": "assistant",
+                                              "content": assistant_reply})
